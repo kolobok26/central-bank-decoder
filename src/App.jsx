@@ -48,10 +48,19 @@ export default function App() {
     setError("");
     setResult(null);
 
-    const prompt = `You are a monetary-policy analyst. Analyze the central bank communication below and return ONLY valid JSON — no markdown, no backticks, no preamble — matching exactly this shape:
-{"institution": string, "stance": "Dovish"|"Neutral"|"Hawkish", "stanceScore": integer from -100 (maximally dovish) to 100 (maximally hawkish), "summary": string, "keySignals": [{"signal": string, "interpretation": string}], "jargon": [{"term": string, "definition": string}], "marketImplications": string}
+   const prompt = `You are a monetary-policy analyst. Analyze the central bank communication below and return ONLY valid JSON — no markdown, no backticks, no preamble — matching exactly this shape:
+{"institution": string, "summary": string, "dimensions": {"forwardGuidance": {"score": integer -2..2, "note": string}, "inflation": {"score": integer -2..2, "note": string}, "currentAction": {"score": integer -2..2, "note": string}, "growthLabour": {"score": integer -2..2, "note": string}, "balanceSheet": {"score": integer -2..2, "note": string}, "riskBalance": {"score": integer -2..2, "note": string}}, "keySignals": [{"signal": string, "interpretation": string}], "jargon": [{"term": string, "definition": string}], "marketImplications": string}
 
-Rules: identify the institution if recognizable (else "Unspecified central bank"). summary <= 2 plain-English sentences. keySignals: 3-4 items, each interpretation <= 1 sentence. jargon: 3-5 technical terms ACTUALLY present in the text, definitions <= 1 sentence in plain English. marketImplications <= 2 sentences. Be concise to fit the token limit.
+Scoring guide for each dimension, -2 (very dovish) to +2 (very hawkish), 0 if not addressed:
+- forwardGuidance: signals about future moves (tightening bias = +, easing bias = -)
+- inflation: elevated/persistent = +, easing/on-track = -
+- currentAction: hike = +, cut = -, hold = 0
+- growthLabour: strong/robust = +, cooling/softening = -
+- balanceSheet: QT/runoff = +, QE/pausing runoff = -
+- riskBalance: risks skewed to tightening = +, to easing = -
+Each "note" <= 12 words, citing the specific language.
+
+Rules: identify the institution if recognizable (else "Unspecified central bank"). summary <= 2 plain-English sentences. keySignals: 3-4 items, each interpretation <= 1 sentence. jargon: 3-5 technical terms ACTUALLY present in the text, definitions <= 1 sentence in plain English. marketImplications <= 2 sentences. Be concise.
 
 STATEMENT:
 ${text.trim()}`;
@@ -67,10 +76,32 @@ ${text.trim()}`;
         .filter((b) => b.type === "text")
         .map((b) => b.text)
         .join("\n");
-      const start = raw.indexOf("{");
+     const start = raw.indexOf("{");
       const end = raw.lastIndexOf("}");
       if (start === -1 || end === -1) throw new Error("no json");
       const parsed = JSON.parse(raw.slice(start, end + 1));
+
+      // ── Auditable scoring: computed in code, not chosen by the model ──
+      const WEIGHTS = {
+        forwardGuidance: 0.35,
+        inflation: 0.20,
+        currentAction: 0.15,
+        growthLabour: 0.12,
+        balanceSheet: 0.08,
+        riskBalance: 0.10,
+      };
+      const d = parsed.dimensions || {};
+      let weighted = 0;
+      for (const key in WEIGHTS) {
+        const s = Math.max(-2, Math.min(2, Number(d[key]?.score) || 0));
+        weighted += s * WEIGHTS[key];
+      }
+      const computedScore = Math.round(weighted * 50); // -2..2 weighted → -100..100
+      const stance =
+        computedScore > 15 ? "Hawkish" : computedScore < -15 ? "Dovish" : "Neutral";
+      parsed.stanceScore = computedScore;
+      parsed.stance = stance;
+
       setResult(parsed);
     } catch (e) {
       setError(
@@ -142,7 +173,12 @@ ${text.trim()}`;
 
         {result && (
           <div style={{ marginTop: 24 }}>
-            <StancePanel result={result} />
+           <StancePanel result={result} />
+            {result.dimensions && (
+              <Section icon={<Activity size={15} />} title="Score breakdown">
+                <ScoreBreakdown dimensions={result.dimensions} />
+              </Section>
+            )}
             <Section icon={<FileText size={15} />} title="Plain-language summary">
               <p style={{ fontSize: 15, lineHeight: 1.65, margin: 0 }}>{result.summary}</p>
             </Section>
@@ -207,6 +243,52 @@ function StancePanel({ result }) {
         <span>Neutral</span>
         <span style={{ color: C.hawk }}>Hawkish · tightening ►</span>
       </div>
+    </div>
+  );
+}
+
+const DIM_LABELS = {
+  forwardGuidance: "Forward guidance",
+  inflation: "Inflation assessment",
+  currentAction: "Current action",
+  growthLabour: "Growth & labour",
+  balanceSheet: "Balance sheet",
+  riskBalance: "Risk balance",
+};
+const DIM_WEIGHTS = {
+  forwardGuidance: "35%", inflation: "20%", currentAction: "15%",
+  growthLabour: "12%", balanceSheet: "8%", riskBalance: "10%",
+};
+
+function ScoreBreakdown({ dimensions }) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {Object.keys(DIM_LABELS).map((key) => {
+        const dim = dimensions[key] || {};
+        const s = Math.max(-2, Math.min(2, Number(dim.score) || 0));
+        const barColor = s > 0 ? C.hawk : s < 0 ? C.dove : C.neutralAccent;
+        const width = (Math.abs(s) / 2) * 50;
+        return (
+          <div key={key}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>
+                {DIM_LABELS[key]}
+                <span style={{ fontFamily: mono, fontSize: 11, color: C.inkSoft, marginLeft: 6 }}>weight {DIM_WEIGHTS[key]}</span>
+              </span>
+              <span style={{ fontFamily: mono, fontSize: 12, color: barColor }}>{s > 0 ? `+${s}` : s}</span>
+            </div>
+            <div style={{ position: "relative", height: 6, background: C.line, borderRadius: 999 }}>
+              <div style={{ position: "absolute", left: "50%", top: 0, height: "100%", width: 1, background: C.inkSoft }} />
+              <div style={{
+                position: "absolute", top: 0, height: "100%", borderRadius: 999, background: barColor,
+                width: `${width}%`,
+                left: s >= 0 ? "50%" : `${50 - width}%`,
+              }} />
+            </div>
+            {dim.note && <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 4, lineHeight: 1.4 }}>{dim.note}</div>}
+          </div>
+        );
+      })}
     </div>
   );
 }
